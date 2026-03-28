@@ -13,4 +13,8 @@ Final Model Comparison and Business Insights
 
 
 # Final-Project---Breast-cancer-ensemble
-A key challenge for e-commerce businesses is to analyze the trend in the  market to increase their sales. The trend can be easily observed if the  companies can group the customers; based on their activity on the e-  commerce site. This grouping can be done by applying different criteria like  previous orders, mostly searched brands and so on. 
+Breast cancer represents one of the diseases that make a high number of deaths every 
+year. It is the most common type of all cancers and the main cause of women's deaths 
+worldwide. Classification and data mining methods are an effective way to classify data. 
+Especially in the medical field, where those methods are widely used in diagnosis and 
+analysis to make decisions. . 
