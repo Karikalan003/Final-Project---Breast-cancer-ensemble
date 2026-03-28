@@ -1,0 +1,636 @@
+pip install xgboost
+# Core
+import numpy as np
+import pandas as pd
+
+# Visualization
+import matplotlib.pyplot as plt
+import seaborn as sns
+%matplotlib inline
+plt.style.use('seaborn-v0_8-whitegrid')
+
+# Pre-processing
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.model_selection import train_test_split, GridSearchCV, cross_val_score, StratifiedKFold
+
+# Baseline classifiers
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.neighbors import KNeighborsClassifier
+
+# Ensemble methods
+from sklearn.ensemble import (
+    BaggingClassifier,
+    RandomForestClassifier,
+    AdaBoostClassifier,
+    GradientBoostingClassifier,
+    VotingClassifier,
+    StackingClassifier
+)
+
+# SVM
+from sklearn.svm import SVC
+
+# Metrics
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score,
+    confusion_matrix, classification_report,
+    roc_auc_score, roc_curve, ConfusionMatrixDisplay
+)
+
+import warnings
+warnings.filterwarnings('ignore')
+
+# Optional: XGBoost
+try:
+    from xgboost import XGBClassifier
+    XGBOOST_AVAILABLE = True
+    print("XGBoost is available!")
+except ImportError:
+    XGBOOST_AVAILABLE = False
+    print("XGBoost not installed. Run: pip install xgboost")
+
+print("All libraries imported successfully!")
+
+df = pd.read_csv('cancer.csv')
+print(f"Dataset Shape  : {df.shape}")
+print(f"Rows           : {df.shape[0]}")
+print(f"Columns        : {df.shape[1]}")
+df.head()
+df.tail()
+df.info()
+df.describe().T #transpose
+
+# Target variable distribution
+print("Target Distribution:")
+print(df['diagnosis'].value_counts())
+print("\nClass Balance:")
+print(df['diagnosis'].value_counts(normalize=True).apply(lambda x: f"{x*100:.1f}%"))
+
+# Check Missing Values
+missing = df.isnull().sum()
+missing_pct = (df.isnull().sum() / len(df)) * 100
+missing_df = pd.DataFrame({'Count': missing, 'Pct (%)': missing_pct}).query('Count > 0')
+
+if missing_df.empty:
+    print("No missing values found!")
+else:
+    print("Missing Values Found:")
+    print(missing_df)
+    # Fill numeric with median (robust to outliers)
+    for col in df.select_dtypes(include='number').columns:
+        df[col].fillna(df[col].median(), inplace=True)
+    print("Numeric columns filled with median.")
+
+# Check and Remove Duplicates
+dupes = df.duplicated().sum()
+print(f"Duplicate rows: {dupes}")
+if dupes > 0:
+    df.drop_duplicates(inplace=True)
+    print(f"Removed duplicates. New shape: {df.shape}")
+else:
+    print("No duplicates found!")
+
+# Drop Irrelevant Columns
+# 'id' is a patient identifier — not a predictor
+# 'Unnamed: 32' is an empty artifact column in the Wisconsin dataset
+cols_to_drop = [col for col in ['id', 'Unnamed: 32'] if col in df.columns]
+if cols_to_drop:
+    df.drop(columns=cols_to_drop, inplace=True)
+    print(f"Dropped columns: {cols_to_drop}")
+else:
+    print("No irrelevant columns to drop.")
+
+  # Encode Target Variable
+# Malignant = 1 (positive class, cancer present)
+# Benign    = 0 (negative class, no cancer)
+le = LabelEncoder()
+df['Diagnosis_Encoded'] = le.fit_transform(df['diagnosis'])
+
+mapping = dict(zip(le.classes_, le.transform(le.classes_)))
+print(f"Encoding Mapping: {mapping}")
+print(f"Final dataset shape: {df.shape}")
+
+Exploratory Data Analysis (EDA)
+
+# Target Distribution — Bar and Pie
+fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+counts = df['diagnosis'].value_counts()
+palette = {'M': '#E74C3C', 'B': '#2ECC71'}
+
+bars = axes[0].bar(counts.index, counts.values,
+                   color=[palette[c] for c in counts.index],
+                   edgecolor='black', linewidth=0.8, width=0.5)
+axes[0].set_title('Diagnosis Class Distribution', fontsize=14, fontweight='bold')
+axes[0].set_ylabel('Count')
+for bar, val in zip(bars, counts.values):
+    axes[0].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 3,
+                 f'{val}\n({val/len(df)*100:.1f}%)', ha='center', fontweight='bold')
+
+axes[1].pie(counts.values, labels=counts.index, autopct='%1.1f%%',
+            colors=[palette[c] for c in counts.index],
+            startangle=90, explode=[0.05, 0.05], textprops={'fontsize': 12})
+axes[1].set_title('diagnosis Proportion', fontsize=14, fontweight='bold')
+
+plt.suptitle('Target Variable: Breast Cancer Diagnosis', fontsize=15, fontweight='bold', y=1.02)
+plt.tight_layout()
+plt.show()
+
+# Distribution of Mean Features by Diagnosis
+# Auto-detect mean feature columns
+mean_features = [col for col in df.columns if 'mean' in col.lower()][:10]
+print(f"Mean features found: {mean_features}")
+
+fig, axes = plt.subplots(2, 5, figsize=(20, 8))
+axes = axes.flatten()
+
+for i, feat in enumerate(mean_features):
+    for diag, color in palette.items():
+        subset = df[df['diagnosis'] == diag][feat]
+        axes[i].hist(subset, alpha=0.6, color=color, label=diag, bins=25, edgecolor='white')
+    axes[i].set_title(feat.replace('_mean','').replace('_',' ').title(), fontsize=10, fontweight='bold')
+    axes[i].legend(fontsize=8)
+    axes[i].set_xlabel('Value')
+    axes[i].set_ylabel('Count')
+
+plt.suptitle('Distribution of Mean Features by Diagnosis', fontsize=15, fontweight='bold', y=1.02)
+plt.tight_layout()
+plt.show()
+
+# Boxplots — Feature Spread by Diagnosis
+fig, axes = plt.subplots(2, 5, figsize=(20, 8))
+axes = axes.flatten()
+
+for i, feat in enumerate(mean_features):
+    df.boxplot(column=feat, by='diagnosis', ax=axes[i],
+               boxprops=dict(color='#2C3E50'),
+               medianprops=dict(color='red', linewidth=2),
+               whiskerprops=dict(color='#2C3E50'),
+               capprops=dict(color='#2C3E50'))
+    axes[i].set_title(feat.replace('_mean','').replace('_',' ').title(), fontsize=10, fontweight='bold')
+    axes[i].set_xlabel('')
+
+fig.suptitle('Boxplots: Mean Features by Diagnosis', fontsize=15, fontweight='bold', y=1.01)
+plt.tight_layout()
+plt.show()
+
+# Correlation Heatmap — All Numeric Features
+plt.figure(figsize=(18, 14))
+numeric_df = df.select_dtypes(include='number').drop(columns=['Diagnosis_Encoded'], errors='ignore')
+corr = numeric_df.corr()
+mask = np.triu(np.ones_like(corr, dtype=bool))
+
+sns.heatmap(corr, mask=mask, cmap='RdYlGn', center=0,
+            linewidths=0.3, linecolor='white', vmin=-1, vmax=1)
+plt.title('Feature Correlation Heatmap', fontsize=16, fontweight='bold')
+plt.xticks(rotation=45, ha='right', fontsize=8)
+plt.yticks(fontsize=8)
+plt.tight_layout()
+plt.show()
+
+# Feature Correlation with Target (Diagnosis)
+numeric_df_with_target = df.select_dtypes(include='number')
+corr_target = numeric_df_with_target.corr()['Diagnosis_Encoded'].drop('Diagnosis_Encoded').sort_values(ascending=False)
+
+plt.figure(figsize=(12, 8))
+colors = ['#E74C3C' if v > 0 else '#3498DB' for v in corr_target.values]
+plt.barh(corr_target.index, corr_target.values, color=colors, edgecolor='black', linewidth=0.5)
+plt.axvline(0, color='black', linewidth=0.8)
+plt.title('Feature Correlation with Diagnosis\n(Red = Positive Correlation with Malignant)', fontsize=13, fontweight='bold')
+plt.xlabel('Pearson Correlation Coefficient')
+plt.tight_layout()
+plt.show()
+
+print("\nTop 10 features most correlated with Malignant diagnosis:")
+print(corr_target.head(10))
+
+# Pairplot of Top 4 Mean Features
+key_features = mean_features[:4] + ['diagnosis']
+pp = sns.pairplot(df[key_features], hue='diagnosis',
+                  palette=palette, plot_kws={'alpha': 0.6}, diag_kind='kde')
+pp.fig.suptitle('Pairplot: Key Mean Features by Diagnosis', fontsize=14, fontweight='bold', y=1.02)
+plt.show()
+
+# Define X (features) and y (target)
+X = df.drop(columns=['diagnosis', 'Diagnosis_Encoded'], errors='ignore')
+X = X.select_dtypes(include='number')
+y = df['Diagnosis_Encoded']
+
+print(f"Features (X) shape : {X.shape}")
+print(f"Target   (y) shape : {y.shape}")
+print(f"Classes            : {dict(zip(*np.unique(y, return_counts=True)))}")
+
+# Train-Test Split: 80% train, 20% test, stratified to preserve class ratio
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+# StandardScaler: mean=0, std=1 (required for SVM and KNN)
+scaler = StandardScaler()
+X_train_sc = scaler.fit_transform(X_train)  # Fit ONLY on train
+X_test_sc  = scaler.transform(X_test)       # Transform test with train params
+
+print(f"Train set : {X_train.shape} | Class dist: {dict(zip(*np.unique(y_train, return_counts=True)))}")
+print(f"Test  set : {X_test.shape}  | Class dist: {dict(zip(*np.unique(y_test, return_counts=True)))}")
+
+Evaluation Helper Function
+
+results = {}  # Stores all model results for final comparison
+
+def evaluate_model(name, model, X_tr, y_tr, X_te, y_te):
+    """
+    Train model and compute all key metrics:
+    Accuracy, Precision, Sensitivity (Recall), Specificity, F1, AUC-ROC.
+    """
+    model.fit(X_tr, y_tr)
+    y_pred = model.predict(X_te)
+    y_prob = model.predict_proba(X_te)[:, 1] if hasattr(model, 'predict_proba') else None
+
+    acc  = accuracy_score(y_te, y_pred)
+    prec = precision_score(y_te, y_pred)
+    rec  = recall_score(y_te, y_pred)      # Sensitivity = TP / (TP + FN)
+    f1   = f1_score(y_te, y_pred)
+
+    cm = confusion_matrix(y_te, y_pred)
+    tn, fp, fn, tp = cm.ravel()
+    specificity = tn / (tn + fp)           # Specificity = TN / (TN + FP)
+
+    auc = roc_auc_score(y_te, y_prob) if y_prob is not None else roc_auc_score(y_te, y_pred)
+
+    metrics = {
+        'Accuracy'   : round(acc * 100, 2),
+        'Precision'  : round(prec * 100, 2),
+        'Sensitivity': round(rec * 100, 2),
+        'Specificity': round(specificity * 100, 2),
+        'F1 Score'   : round(f1 * 100, 2),
+        'AUC-ROC'    : round(auc * 100, 2)
+    }
+
+    results[name] = {**metrics, 'y_prob': y_prob, 'y_pred': y_pred, 'cm': cm, 'model': model}
+
+    print(f"\n{'='*52}")
+    print(f"  Model: {name}")
+    print(f"{'='*52}")
+    for k, v in metrics.items():
+        bar = 'I' * int(v / 5)
+        print(f"  {k:<15}: {v:>6.2f}%  {bar}")
+
+    return metrics
+
+print("Evaluation function ready!")
+
+Baseline Models
+
+# Decision Tree (single tree baseline)
+evaluate_model('Decision Tree',
+               DecisionTreeClassifier(random_state=42),
+               X_train_sc, y_train, X_test_sc, y_test)
+
+# Logistic Regression
+evaluate_model('Logistic Regression',
+               LogisticRegression(max_iter=1000, random_state=42),
+               X_train_sc, y_train, X_test_sc, y_test)
+
+# K-Nearest Neighbors
+evaluate_model('KNN',
+               KNeighborsClassifier(n_neighbors=5),
+               X_train_sc, y_train, X_test_sc, y_test)
+
+Ensemble Methods
+
+evaluate_model('Bagging',
+               BaggingClassifier(
+                   estimator=DecisionTreeClassifier(),
+                   n_estimators=100,
+                   max_samples=0.8,
+                   max_features=0.8,
+                   random_state=42,
+                   n_jobs=-1
+               ),
+               X_train_sc, y_train, X_test_sc, y_test)
+
+Random Forest
+evaluate_model('Random Forest',
+               RandomForestClassifier(
+                   n_estimators=200,
+                   max_depth=None,
+                   min_samples_split=2,
+                   random_state=42,
+                   n_jobs=-1
+               ),
+               X_train_sc, y_train, X_test_sc, y_test)
+
+  # Feature Importance from Random Forest
+rf_model = results['Random Forest']['model']
+feat_imp = pd.Series(rf_model.feature_importances_, index=X.columns).sort_values(ascending=False)
+
+plt.figure(figsize=(12, 7))
+colors = plt.cm.RdYlGn(np.linspace(0.2, 0.9, 20))
+feat_imp.head(20).plot(kind='barh', color=colors[::-1], edgecolor='black', linewidth=0.5)
+plt.title('Top 20 Feature Importances — Random Forest', fontsize=14, fontweight='bold')
+plt.xlabel('Importance Score')
+plt.gca().invert_yaxis()
+plt.tight_layout()
+plt.show()
+
+print("Top 10 Most Important Features:")
+print(feat_imp.head(10).to_string())
+
+AdaBoost (Adaptive Boosting)
+
+evaluate_model('AdaBoost',
+               AdaBoostClassifier(
+                   estimator=DecisionTreeClassifier(max_depth=1),  # Stump as weak learner
+                   n_estimators=200,
+                   learning_rate=0.5,
+                   random_state=42
+               ),
+               X_train_sc, y_train, X_test_sc, y_test)
+
+Gradient Boosting
+evaluate_model('Gradient Boosting',
+               GradientBoostingClassifier(
+                   n_estimators=200,
+                   learning_rate=0.1,
+                   max_depth=3,
+                   subsample=0.8,
+                   random_state=42
+               ),
+               X_train_sc, y_train, X_test_sc, y_test)
+XGBoost
+if XGBOOST_AVAILABLE:
+    evaluate_model('XGBoost',
+                   XGBClassifier(
+                       n_estimators=200,
+                       learning_rate=0.1,
+                       max_depth=4,
+                       subsample=0.8,
+                       colsample_bytree=0.8,
+                       eval_metric='logloss',
+                       random_state=42
+                   ),
+                   X_train_sc, y_train, X_test_sc, y_test)
+else:
+    print("XGBoost skipped. Install with: pip install xgboost")
+
+  
+Voting Classifier
+# Hard Voting
+hard_voting = VotingClassifier(
+    estimators=[
+        ('lr', LogisticRegression(max_iter=1000, random_state=42)),
+        ('rf', RandomForestClassifier(n_estimators=100, random_state=42)),
+        ('gb', GradientBoostingClassifier(n_estimators=100, random_state=42))
+    ],
+    voting='hard'
+)
+evaluate_model('Voting (Hard)', hard_voting, X_train_sc, y_train, X_test_sc, y_test)
+
+# Soft Voting
+soft_voting = VotingClassifier(
+    estimators=[
+        ('lr', LogisticRegression(max_iter=1000, random_state=42)),
+        ('rf', RandomForestClassifier(n_estimators=100, random_state=42)),
+        ('gb', GradientBoostingClassifier(n_estimators=100, random_state=42))
+    ],
+    voting='soft'
+)
+evaluate_model('Voting (Soft)', soft_voting, X_train_sc, y_train, X_test_sc, y_test)
+
+Stacking Classifier
+stacking = StackingClassifier(
+    estimators=[
+        ('dt',  DecisionTreeClassifier(max_depth=5, random_state=42)),
+        ('knn', KNeighborsClassifier(n_neighbors=5)),
+        ('rf',  RandomForestClassifier(n_estimators=100, random_state=42))
+    ],
+    final_estimator=LogisticRegression(max_iter=1000),
+    cv=5,
+    n_jobs=-1
+)
+evaluate_model('Stacking', stacking, X_train_sc, y_train, X_test_sc, y_test)
+
+SVM Classifier
+# SVM with Default Parameters
+# SVM finds the hyperplane that maximizes the margin between classes
+evaluate_model('SVM (Default)',
+               SVC(kernel='rbf', probability=True, random_state=42),
+               X_train_sc, y_train, X_test_sc, y_test)
+
+# Compare SVM Kernels
+kernels = ['linear', 'rbf', 'poly', 'sigmoid']
+kernel_results = {}
+
+print("SVM Kernel Comparison:\n")
+print(f"{'Kernel':<10} {'Accuracy':>10} {'AUC-ROC':>10} {'Sensitivity':>12} {'Specificity':>12}")
+print("-" * 58)
+
+for kernel in kernels:
+    svm = SVC(kernel=kernel, probability=True, random_state=42)
+    svm.fit(X_train_sc, y_train)
+    y_pred = svm.predict(X_test_sc)
+    y_prob = svm.predict_proba(X_test_sc)[:, 1]
+    cm_k = confusion_matrix(y_test, y_pred)
+    tn_k, fp_k, fn_k, tp_k = cm_k.ravel()
+    acc  = accuracy_score(y_test, y_pred) * 100
+    auc  = roc_auc_score(y_test, y_prob) * 100
+    sens = recall_score(y_test, y_pred) * 100
+    spec = tn_k / (tn_k + fp_k) * 100
+    kernel_results[kernel] = {'Accuracy': acc, 'AUC': auc, 'Sensitivity': sens, 'Specificity': spec}
+    print(f"{kernel:<10} {acc:>9.2f}% {auc:>9.2f}% {sens:>11.2f}% {spec:>11.2f}%")
+
+Hyperparameter Tuning — SVM with GridSearchCV
+param_grid = {
+    'C'     : [0.1, 1, 10, 100],
+    'gamma' : ['scale', 'auto', 0.001, 0.01],
+    'kernel': ['rbf', 'linear']
+}
+
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+grid_search = GridSearchCV(
+    SVC(probability=True, random_state=42),
+    param_grid=param_grid,
+    cv=cv,
+    scoring='roc_auc',  # Optimizing AUC is better than accuracy for medical data
+    n_jobs=-1,
+    verbose=1
+)
+
+print("Running GridSearchCV (this may take 1-2 minutes)...")
+grid_search.fit(X_train_sc, y_train)
+
+print(f"\nBest Parameters : {grid_search.best_params_}")
+print(f"Best CV AUC     : {grid_search.best_score_*100:.2f}%")
+
+# Evaluate best SVM
+best_svm = grid_search.best_estimator_
+evaluate_model('SVM (Tuned)', best_svm, X_train_sc, y_train, X_test_sc, y_test)
+# Cross-Validation on Tuned SVM
+cv_scores = cross_val_score(best_svm, X_train_sc, y_train, cv=cv, scoring='roc_auc')
+print(f"5-Fold Cross-Validation AUC (Tuned SVM):")
+for i, s in enumerate(cv_scores, 1):
+    print(f"  Fold {i}: {s*100:.2f}%")
+print(f"  Mean : {cv_scores.mean()*100:.2f}%")
+print(f"  Std  : +/-{cv_scores.std()*100:.2f}%")
+
+
+Final Model Comparison and Visualizations
+# Summary Table
+metrics_keys = ['Accuracy', 'Precision', 'Sensitivity', 'Specificity', 'F1 Score', 'AUC-ROC']
+summary = pd.DataFrame(
+    {name: {k: v for k, v in res.items() if k in metrics_keys}
+     for name, res in results.items()}
+).T
+
+print("MODEL PERFORMANCE SUMMARY (all values in %)")
+print("=" * 85)
+print(summary.to_string())
+print(f"\nBest Model by AUC-ROC : {summary['AUC-ROC'].idxmax()} ({summary['AUC-ROC'].max():.2f}%)")
+print(f"Best Model by Sensitivity: {summary['Sensitivity'].idxmax()} ({summary['Sensitivity'].max():.2f}%)")
+
+# Styled Heatmap Table
+summary.style\
+    .background_gradient(cmap='YlOrRd', axis=0)\
+    .format("{:.2f}%")\
+    .set_caption("Model Comparison Heatmap (all metrics in %)")
+
+# Grouped Bar Chart — All Models vs All Metrics
+fig, ax = plt.subplots(figsize=(18, 7))
+x = np.arange(len(summary))
+width = 0.13
+metric_colors = ['#3498DB', '#E74C3C', '#2ECC71', '#F39C12', '#9B59B6', '#1ABC9C']
+
+for i, (metric, color) in enumerate(zip(metrics_keys, metric_colors)):
+    ax.bar(x + i * width, summary[metric], width,
+           label=metric, color=color, alpha=0.85, edgecolor='white', linewidth=0.5)
+
+ax.set_xticks(x + width * 2.5)
+ax.set_xticklabels(summary.index, rotation=30, ha='right', fontsize=10)
+ax.set_title('All Models vs All Performance Metrics', fontsize=15, fontweight='bold')
+ax.set_ylabel('Score (%)')
+ax.set_ylim(50, 108)
+ax.legend(loc='lower right', fontsize=10)
+ax.grid(axis='y', alpha=0.4)
+plt.tight_layout()
+plt.savefig('model_comparison.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+# ROC Curves — All Models
+plt.figure(figsize=(12, 8))
+colors_roc = plt.cm.tab10(np.linspace(0, 1, len(results)))
+
+for (name, res), color in zip(results.items(), colors_roc):
+    if res['y_prob'] is not None:
+        fpr, tpr, _ = roc_curve(y_test, res['y_prob'])
+        plt.plot(fpr, tpr, label=f"{name} (AUC={res['AUC-ROC']:.1f}%)",
+                 color=color, linewidth=1.8)
+
+plt.plot([0, 1], [0, 1], 'k--', linewidth=1, label='Random Classifier (AUC=50%)')
+plt.title('ROC Curves — All Models', fontsize=15, fontweight='bold')
+plt.xlabel('False Positive Rate (1 - Specificity)', fontsize=12)
+plt.ylabel('True Positive Rate (Sensitivity)', fontsize=12)
+plt.legend(loc='lower right', fontsize=9)
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig('roc_curves.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+# Confusion Matrix — Best Model
+best_model_name = summary['AUC-ROC'].idxmax()
+best_cm = results[best_model_name]['cm']
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+# Raw counts
+disp = ConfusionMatrixDisplay(confusion_matrix=best_cm,
+                               display_labels=['Benign (0)', 'Malignant (1)'])
+disp.plot(ax=axes[0], colorbar=False, cmap='Blues')
+axes[0].set_title(f'Confusion Matrix: {best_model_name}\n(Counts)', fontsize=12, fontweight='bold')
+
+# Normalized
+cm_norm = best_cm.astype('float') / best_cm.sum(axis=1)[:, np.newaxis]
+disp2 = ConfusionMatrixDisplay(confusion_matrix=cm_norm,
+                                display_labels=['Benign (0)', 'Malignant (1)'])
+disp2.plot(ax=axes[1], colorbar=False, cmap='Oranges')
+axes[1].set_title(f'Confusion Matrix: {best_model_name}\n(Normalized)', fontsize=12, fontweight='bold')
+
+plt.tight_layout()
+plt.savefig('confusion_matrix.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+tn, fp, fn, tp = best_cm.ravel()
+print(f"\nConfusion Matrix Details ({best_model_name}):")
+print(f"  True  Negatives (Benign correctly identified)  : {tn}")
+print(f"  False Positives (Benign wrongly flagged cancer): {fp}  <-- Type I Error")
+print(f"  False Negatives (Cancer missed!)               : {fn}  <-- Type II Error (Most Critical!)")
+print(f"  True  Positives (Cancer correctly detected)    : {tp}")
+
+
+# Classification Report — Best Model
+y_pred_best = results[best_model_name]['y_pred']
+print(f"Classification Report: {best_model_name}")
+print("=" * 55)
+print(classification_report(y_test, y_pred_best, target_names=['Benign', 'Malignant']))
+
+# Sensitivity vs Specificity Scatter Plot
+# In cancer detection: HIGH SENSITIVITY is the most critical requirement.
+# Missed cancers (False Negatives) are far more dangerous than false alarms.
+
+fig, ax = plt.subplots(figsize=(11, 8))
+for name, res in results.items():
+    ax.scatter(res['Specificity'], res['Sensitivity'], s=200, zorder=5)
+    ax.annotate(name, (res['Specificity'], res['Sensitivity']),
+                textcoords='offset points', xytext=(6, 4), fontsize=8)
+
+ax.set_xlabel('Specificity (%) — Correct Benign Identification', fontsize=12)
+ax.set_ylabel('Sensitivity (%) — Correct Malignant Detection', fontsize=12)
+ax.set_title('Sensitivity vs Specificity\n(Ideal model: Top-Right Corner)', fontsize=13, fontweight='bold')
+ax.axvline(90, color='orange', linestyle='--', alpha=0.5, label='90% Specificity')
+ax.axhline(90, color='red', linestyle='--', alpha=0.5, label='90% Sensitivity (critical threshold)')
+ax.legend(fontsize=9)
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig('sensitivity_specificity.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+# Save model comparison table
+summary.to_csv('model_performance_summary.csv')
+print("Saved: model_performance_summary.csv")
+
+
+Export Results
+# Save predictions from best model
+pred_df = X_test.copy()
+pred_df['Actual']          = y_test.values
+pred_df['Predicted']       = results[best_model_name]['y_pred']
+pred_df['Actual_Label']    = pred_df['Actual'].map({0: 'Benign', 1: 'Malignant'})
+pred_df['Predicted_Label'] = pred_df['Predicted'].map({0: 'Benign', 1: 'Malignant'})
+pred_df['Correct']         = (pred_df['Actual'] == pred_df['Predicted'])
+pred_df.to_csv('predictions_best_model.csv', index=False)
+print(f"Saved: predictions_best_model.csv  [Best model: {best_model_name}]")
+
+Final Report
+print("=" * 65)
+print("     BREAST CANCER PREDICTION — FINAL SUMMARY REPORT")
+print("=" * 65)
+print(f"  Dataset               : {len(df)} patients, {X.shape[1]} features")
+print(f"  Target Classes        : Malignant (1=Cancer) | Benign (0=No Cancer)")
+print(f"  Train / Test Split    : 80% / 20% (stratified)")
+print(f"  Total Models Tested   : {len(results)}")
+print(f"  Best Model (AUC-ROC)  : {summary['AUC-ROC'].idxmax()} — {summary['AUC-ROC'].max():.2f}%")
+print(f"  Best Sensitivity      : {summary['Sensitivity'].max():.2f}% ({summary['Sensitivity'].idxmax()})")
+print(f"  Best Specificity      : {summary['Specificity'].max():.2f}% ({summary['Specificity'].idxmax()})")
+print("=" * 65)
+print("\nKey Insights:")
+print("  1. SENSITIVITY is the most critical metric in cancer detection.")
+print("     A False Negative (missed cancer) is far more dangerous")
+print("     than a False Positive (unnecessary biopsy).")
+print("  2. AUC-ROC > 95% means the model is an excellent discriminator.")
+print("  3. Boosting methods (AdaBoost, Gradient Boosting, XGBoost)")
+print("     generally outperform bagging on structured medical data.")
+print("  4. SVM (tuned) is highly competitive on high-dimensional")
+print("     normalized medical features.")
+print("  5. Most predictive features: concave points, perimeter,")
+print("     area, and radius — especially the 'worst' values.")
+print("=" * 65)
